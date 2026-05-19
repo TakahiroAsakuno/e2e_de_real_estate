@@ -20,7 +20,7 @@ data/
 
 | 利用シーン | API キー | 備考 |
 |---|---|---|
-| **デモを実行するだけ** | **不要** | `data/external/reinfolib/` の JSON を Volume にコピーして使う |
+| **デモを実行するだけ** | **不要** | `data/external/reinfolib/` の `*.json.gz` を Volume に展開コピーして使う |
 | reinfolib データを最新版に更新 | 必要 | `FORCE_REFRESH=True` で再取得 → 結果を git commit |
 | KSJ / ISJ / OSM の最新データ取得 | 不要（公開 ZIP） | ただしネットワーク必要 |
 

@@ -240,13 +240,15 @@ REPO_REINFOLIB_CANDIDATES = [
 
 def _find_repo_reinfolib_dir() -> Optional[str]:
     for p in REPO_REINFOLIB_CANDIDATES:
-        if _os.path.isdir(p) and any(f.endswith(".json") for f in _os.listdir(p)):
+        if _os.path.isdir(p) and any(f.endswith((".json", ".json.gz")) for f in _os.listdir(p)):
             return p
     return None
 
 
 def sync_repo_reinfolib_to_volume() -> int:
-    """リポジトリの data/external/reinfolib/*.json を Volume の reinfolib_cache/ にコピー。コピー件数を返す"""
+    """リポジトリの data/external/reinfolib/*.json(.gz) を Volume の reinfolib_cache/ にコピー。コピー件数を返す。
+    .json.gz は転送量削減のためリポジトリでは gzip 圧縮（実測 168MB → 4.8MB）。Volume には展開後の .json で配置する。"""
+    import gzip as _gzip
     src_dir = _find_repo_reinfolib_dir()
     if not src_dir:
         print("   リポジトリに reinfolib JSON 無し（API 取得 or SAFE_MODE に fallback）")
@@ -255,19 +257,29 @@ def sync_repo_reinfolib_to_volume() -> int:
     dbutils.fs.mkdirs(dst_dir)
     copied = 0
     for fn in sorted(_os.listdir(src_dir)):
-        if not fn.endswith(".json"):
+        if fn.endswith(".json.gz"):
+            dst_fn = fn[:-3]  # .json.gz → .json
+            is_gz = True
+        elif fn.endswith(".json"):
+            dst_fn = fn
+            is_gz = False
+        else:
             continue
         src = _os.path.join(src_dir, fn)
-        dst = f"{dst_dir}/{fn}"
+        dst = f"{dst_dir}/{dst_fn}"
         # FORCE_REFRESH=True なら上書き、それ以外は存在チェック
         try:
-            existing = any(f.name == fn for f in dbutils.fs.ls(dst_dir) if f.isFile())
+            existing = any(f.name == dst_fn for f in dbutils.fs.ls(dst_dir) if f.isFile())
         except Exception:
             existing = False
         if existing and not FORCE_REFRESH:
             continue
-        with open(src, "r", encoding="utf-8") as f:
-            content = f.read()
+        if is_gz:
+            with _gzip.open(src, "rt", encoding="utf-8") as f:
+                content = f.read()
+        else:
+            with open(src, "r", encoding="utf-8") as f:
+                content = f.read()
         dbutils.fs.put(dst, content, overwrite=True)
         copied += 1
     print(f"   リポジトリ {src_dir} → Volume {dst_dir}: {copied} 件コピー（PDL 1.0 / 出典：国土交通省 不動産情報ライブラリ）")
