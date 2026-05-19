@@ -1,15 +1,22 @@
 # OpenStreetMap POI - 取得済みデータ
 
 このディレクトリには、Overpass API で取得した OpenStreetMap の POI（コンビニ・スーパー・学校）を
-GeoJSON FeatureCollection 形式で格納します。
+GeoJSON FeatureCollection 形式で **gzip 圧縮**して格納します。
+
+> Databricks / GitHub からのクローン高速化のため `.geojson.gz` でコミットしています
+> （元データ 約48MB → 約3MB、圧縮率 6%）。
+> `01_データ準備.py` の `sync_repo_osm_to_volume()` が Volume コピー時に自動展開します。
 
 ## ファイル命名規則
 
 ```
-{region}_{tag}.geojson
+{region}_{tag}.geojson.gz
 ```
 
-例：`tokyo_shop_convenience.geojson`（東京都のコンビニ）
+例：`kanto_shop_convenience.geojson.gz`（首都圏のコンビニ）
+
+新規取得スクリプトで `.geojson` のまま追加した場合も同関数が読み込めますが、
+**コミット時は `gzip -9` 圧縮**してください（例：`gzip -9 *.geojson`）。
 
 | region | 対象範囲 | bbox（南西緯, 南西経, 北東緯, 北東経） |
 |---|---|---|

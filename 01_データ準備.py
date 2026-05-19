@@ -302,13 +302,15 @@ REPO_OSM_CANDIDATES = [
 
 def _find_repo_osm_dir() -> Optional[str]:
     for p in REPO_OSM_CANDIDATES:
-        if _os.path.isdir(p) and any(f.endswith(".geojson") for f in _os.listdir(p)):
+        if _os.path.isdir(p) and any(f.endswith((".geojson", ".geojson.gz")) for f in _os.listdir(p)):
             return p
     return None
 
 
 def sync_repo_osm_to_volume() -> int:
-    """リポジトリの data/external/osm/*.geojson を Volume の geo/osm/ にコピー"""
+    """リポジトリの data/external/osm/*.geojson(.gz) を Volume の geo/osm/ にコピー。
+    .geojson.gz は転送量削減のためリポジトリでは gzip 圧縮（実測 48MB → 3MB）。Volume には展開後の .geojson で配置する。"""
+    import gzip as _gzip
     src_dir = _find_repo_osm_dir()
     if not src_dir:
         print("   リポジトリに OSM GeoJSON 無し（Overpass API 取得 or エラー fallback）")
@@ -317,18 +319,28 @@ def sync_repo_osm_to_volume() -> int:
     dbutils.fs.mkdirs(dst_dir)
     copied = 0
     for fn in sorted(_os.listdir(src_dir)):
-        if not fn.endswith(".geojson"):
+        if fn.endswith(".geojson.gz"):
+            dst_fn = fn[:-3]  # .geojson.gz → .geojson
+            is_gz = True
+        elif fn.endswith(".geojson"):
+            dst_fn = fn
+            is_gz = False
+        else:
             continue
         src = _os.path.join(src_dir, fn)
-        dst = f"{dst_dir}/{fn}"
+        dst = f"{dst_dir}/{dst_fn}"
         try:
-            existing = any(f.name == fn for f in dbutils.fs.ls(dst_dir) if f.isFile())
+            existing = any(f.name == dst_fn for f in dbutils.fs.ls(dst_dir) if f.isFile())
         except Exception:
             existing = False
         if existing and not FORCE_REFRESH:
             continue
-        with open(src, "r", encoding="utf-8") as f:
-            content = f.read()
+        if is_gz:
+            with _gzip.open(src, "rt", encoding="utf-8") as f:
+                content = f.read()
+        else:
+            with open(src, "r", encoding="utf-8") as f:
+                content = f.read()
         dbutils.fs.put(dst, content, overwrite=True)
         copied += 1
     print(f"   リポジトリ {src_dir} → Volume {dst_dir}: {copied} 件コピー（ODbL / 出典：© OpenStreetMap contributors）")
