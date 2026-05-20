@@ -33,7 +33,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,ライブラリインストール
-# MAGIC %pip install --quiet faker tqdm
+# MAGIC %pip install --quiet faker
 
 # COMMAND ----------
 
