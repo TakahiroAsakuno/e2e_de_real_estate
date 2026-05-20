@@ -15,6 +15,16 @@
 # COMMAND ----------
 
 # MAGIC %md-sandbox
+# MAGIC <div style="border-left: 4px solid #D32F2F; background: #FFEBEE; padding: 12px 16px; border-radius: 4px; margin: 10px 0;">
+# MAGIC <strong>⚠ コンピュート要件：Classic cluster 必須</strong><br>
+# MAGIC 本 NB は <code>geopandas / shapely / pyproj / fiona</code> を使用します。<code>fiona</code> はビルド時に <strong>GDAL システムライブラリ</strong>を要求し、<strong>Databricks Serverless compute では動作しません</strong>（GDAL 未インストール + C 拡張ビルド不可のため）。<br>
+# MAGIC <strong>必ず右上のコンピュートメニューから Classic cluster を選択</strong>してください（GDAL プリインストール済み）。<br>
+# MAGIC 他の NB（01, 02, 04 以降）は Serverless で動作します。
+# MAGIC </div>
+
+# COMMAND ----------
+
+# MAGIC %md-sandbox
 # MAGIC <div style="border-left: 4px solid #FFC107; background: #FFF8E1; padding: 12px 16px; border-radius: 4px; margin: 10px 0;">
 # MAGIC <strong>🎯 このノートブックのゴール</strong><br>
 # MAGIC 01 で Volume 配置した KSJ ファイル（Shapefile / GML）/ ISJ / OSM GeoJSON を読み込み、Bronze 地理空間 10 / Silver 地理空間 8 のテーブルを作成します。<br>
