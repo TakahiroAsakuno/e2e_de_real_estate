@@ -33,7 +33,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,ライブラリインストール
-# MAGIC %pip install --quiet geopandas==0.14.4 shapely==2.0.4 pyproj==3.6.1 requests==2.32.3 fiona==1.9.6 h3==4.1.0 faker==25.8.0 tqdm==4.66.4
+# MAGIC %pip install --quiet requests==2.32.3 faker==25.8.0 tqdm==4.66.4
 
 # COMMAND ----------
 
@@ -61,9 +61,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import requests
-import geopandas as gpd
-from shapely.geometry import Point
-import pyproj
 from tqdm import tqdm
 from faker import Faker
 
@@ -95,8 +92,6 @@ def should_fetch(volume_path: str, min_files: int = 1, extensions: Optional[Tupl
     return not has_cached_files(volume_path, min_files, extensions)
 
 
-print(f"geopandas    : {gpd.__version__}")
-print(f"pyproj       : {pyproj.__version__}")
 print(f"FORCE_REFRESH: {FORCE_REFRESH}（True で外部 DL を強制再実行）")
 
 # COMMAND ----------
