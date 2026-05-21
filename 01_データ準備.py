@@ -344,6 +344,74 @@ def sync_repo_osm_to_volume() -> int:
 
 sync_repo_osm_to_volume()
 
+
+# DBTITLE 1,リポジトリ同梱の PDF / MP3 を Volume へ同期（バイナリ）
+# 重要事項説明書・物件パンフ PDF、接客録音 MP3 は Git 管理されているため、
+# 同じ pattern（リポジトリ → Volume コピー）で自動配置する。
+# テキストではなくバイナリなので、Volume の FUSE マウント経由で直接書く（dbutils.fs.put は文字列前提のため使えない）。
+REPO_PDF_CANDIDATES = [
+    "/Workspace/Repos/" + (_os.environ.get("USER") or "") + "/e2e_de_car_sales/sample/e2e_de_real_estate/data/pdf",
+    "/Workspace/Users/" + (_os.environ.get("USER") or "") + "/e2e_de_real_estate/data/pdf",
+    "./data/pdf",
+    "../data/pdf",
+    "./sample/e2e_de_real_estate/data/pdf",
+]
+REPO_AUDIO_CANDIDATES = [
+    "/Workspace/Repos/" + (_os.environ.get("USER") or "") + "/e2e_de_car_sales/sample/e2e_de_real_estate/data/audio",
+    "/Workspace/Users/" + (_os.environ.get("USER") or "") + "/e2e_de_real_estate/data/audio",
+    "./data/audio",
+    "../data/audio",
+    "./sample/e2e_de_real_estate/data/audio",
+]
+
+
+def _find_repo_dir(candidates, ext):
+    for p in candidates:
+        if _os.path.isdir(p) and any(f.lower().endswith(ext) for f in _os.listdir(p)):
+            return p
+    return None
+
+
+def sync_repo_binary_to_volume(src_dir, dst_dir, ext, label):
+    """src_dir 内の {ext} ファイルを dst_dir（Volume FUSE パス）に上書きコピー。
+    既存ファイルが Volume にあれば FORCE_REFRESH=False の限りスキップ。"""
+    if not src_dir:
+        print(f"   リポジトリに {label} 無し（手動配置 fallback）")
+        return 0
+    dbutils.fs.mkdirs(dst_dir)
+    copied = 0
+    for fn in sorted(_os.listdir(src_dir)):
+        if not fn.lower().endswith(ext):
+            continue
+        src = _os.path.join(src_dir, fn)
+        dst = f"{dst_dir}/{fn}"
+        try:
+            existing = any(f.name == fn for f in dbutils.fs.ls(dst_dir) if f.isFile())
+        except Exception:
+            existing = False
+        if existing and not FORCE_REFRESH:
+            continue
+        with open(src, "rb") as f_src, open(dst, "wb") as f_dst:
+            f_dst.write(f_src.read())
+        copied += 1
+    print(f"   リポジトリ {src_dir} → Volume {dst_dir}: {copied} 件コピー")
+    return copied
+
+
+sync_repo_binary_to_volume(
+    _find_repo_dir(REPO_PDF_CANDIDATES, ".pdf"),
+    f"{VOLUME_PATH}/pdf",
+    ".pdf",
+    "PDF",
+)
+sync_repo_binary_to_volume(
+    _find_repo_dir(REPO_AUDIO_CANDIDATES, ".mp3"),
+    f"{VOLUME_PATH}/audio",
+    ".mp3",
+    "MP3",
+)
+
+
 # DBTITLE 1,reinfolib API（リポジトリにも Volume にも無いデータだけ取得）
 # 仕様: https://www.reinfolib.mlit.go.jp/help/apiManual/xit001/
 # 重要: priceClassification=01（取引価格情報のみ）に絞り、成約価格情報を混入させない
@@ -1127,8 +1195,9 @@ market_df.head()
 # MAGIC %md-sandbox
 # MAGIC ## 📄 01-F. PDF（重要事項説明書 + 物件パンフ）の Volume 配置確認
 # MAGIC <div style="border-left: 4px solid #FFC107; background: #FFF8E1; padding: 12px 16px; border-radius: 4px; margin: 10px 0;">
-# MAGIC PDF は <b>事前に手動で Volume に配置</b>する前提（Claude で生成した架空サンプル）。<br>
-# MAGIC 配置先：<code>{VOLUME_PATH}/pdf/</code>  ファイル名規則：<code>jyusetsu_*.pdf</code>（重説 5）/ <code>pamphlet_*.pdf</code>（パンフ 5）
+# MAGIC PDF はリポジトリ <code>data/pdf/</code> から <b>自動同期</b>で Volume へコピー済み（上の sync_repo_binary_to_volume）。<br>
+# MAGIC 配置先：<code>{VOLUME_PATH}/pdf/</code>  ファイル名規則：<code>jyusetsu_*.pdf</code>（重説 5）/ <code>pamphlet_*.pdf</code>（パンフ 5）<br>
+# MAGIC ※ Volume にカスタム PDF を入れたい場合はこのセル後に手動上書きしてください。
 # MAGIC </div>
 
 # COMMAND ----------
@@ -1152,7 +1221,7 @@ else:
 # MAGIC %md-sandbox
 # MAGIC ## 🎤 01-G. MP3（接客録音）の Volume 配置確認
 # MAGIC <div style="border-left: 4px solid #FFC107; background: #FFF8E1; padding: 12px 16px; border-radius: 4px; margin: 10px 0;">
-# MAGIC MP3 も <b>事前に手動で Volume に配置</b>する前提。<br>
+# MAGIC MP3 もリポジトリ <code>data/audio/</code> から <b>自動同期</b>で Volume へコピー済み（上の sync_repo_binary_to_volume）。<br>
 # MAGIC 配置先：<code>{VOLUME_PATH}/audio/</code>  ファイル名規則：<code>recording_*.mp3</code>（5〜10 件）
 # MAGIC </div>
 
