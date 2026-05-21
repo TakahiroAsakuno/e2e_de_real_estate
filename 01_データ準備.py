@@ -33,7 +33,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,ライブラリインストール
-# MAGIC %pip install --quiet faker
+# MAGIC %pip install --quiet faker tqdm
 
 # COMMAND ----------
 
@@ -579,7 +579,8 @@ if missing_required:
 # DBTITLE 1,ISJ ダウンロード
 # TODO(URL): ISJ 公式 https://nlftp.mlit.go.jp/cgi-bin/isj/dls/_choose_method.cgi で最新バージョンを確認
 # 注意: ISJ_VERSION は公開時点の値。最新バージョンに合わせて要修正。
-ISJ_VERSION = "20.0b"
+# 2026-05 時点で取得可能な最新は 23.0a（{pref}000-23.0a.zip）。.0b 系は配信されていない模様。
+ISJ_VERSION = "23.0a"
 ISJ_BASE = "https://nlftp.mlit.go.jp/isj/dls/data"
 ISJ_URL_TMPL = f"{ISJ_BASE}/{ISJ_VERSION}/{{pref}}000-{ISJ_VERSION}.zip"
 
