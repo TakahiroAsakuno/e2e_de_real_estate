@@ -15,16 +15,6 @@
 # COMMAND ----------
 
 # MAGIC %md-sandbox
-# MAGIC <div style="border-left: 4px solid #D32F2F; background: #FFEBEE; padding: 12px 16px; border-radius: 4px; margin: 10px 0;">
-# MAGIC <strong>⚠ コンピュート要件：Classic cluster 必須</strong><br>
-# MAGIC 本 NB は <code>geopandas / shapely / pyproj / fiona</code> を使用します。<code>fiona</code> はビルド時に <strong>GDAL システムライブラリ</strong>を要求し、<strong>Databricks Serverless compute では動作しません</strong>（GDAL 未インストール + C 拡張ビルド不可のため）。<br>
-# MAGIC <strong>必ず右上のコンピュートメニューから Classic cluster を選択</strong>してください（GDAL プリインストール済み）。<br>
-# MAGIC 他の NB（01, 02, 04 以降）は Serverless で動作します。
-# MAGIC </div>
-
-# COMMAND ----------
-
-# MAGIC %md-sandbox
 # MAGIC <div style="border-left: 4px solid #FFC107; background: #FFF8E1; padding: 12px 16px; border-radius: 4px; margin: 10px 0;">
 # MAGIC <strong>🎯 このノートブックのゴール</strong><br>
 # MAGIC 01 で Volume 配置した KSJ ファイル（Shapefile / GML）/ ISJ / OSM GeoJSON を読み込み、Bronze 地理空間 10 / Silver 地理空間 8 のテーブルを作成します。<br>
@@ -40,7 +30,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,ライブラリインストール
-# MAGIC %pip install --quiet geopandas==0.14.4 shapely==2.0.4 pyproj==3.6.1 fiona==1.9.6
+# MAGIC %pip install --quiet pyshp shapely pyproj "numpy==2.1.3"
 
 # COMMAND ----------
 
@@ -58,18 +48,27 @@ dbutils.library.restartPython()
 import os
 import glob as _glob
 import hashlib
+import json as _json
 from typing import List, Optional, Tuple, Dict
 
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point, Polygon, MultiPolygon
+import shapefile  # pyshp（Pure Python Shapefile reader）
+from shapely.geometry import shape as _shp_from_geojson
 from shapely.geometry.base import BaseGeometry
-import pyproj
+from shapely.ops import unary_union, transform as _shp_transform
+from pyproj import Transformer, CRS
 
 from pyspark.sql import functions as F
 
-print(f"geopandas : {gpd.__version__}")
-print(f"pyproj    : {pyproj.__version__}")
+# KSJ Shapefile が CRS 未指定の場合のデフォルト（JGD2011 lat/lon）
+_DEFAULT_CRS = CRS.from_epsg(6668)
+_WGS84 = CRS.from_epsg(4326)
+
+print(f"pyshp   : {shapefile.__version__}")
+import shapely as _shapely_mod
+import pyproj as _pyproj_mod
+print(f"shapely : {_shapely_mod.__version__}")
+print(f"pyproj  : {_pyproj_mod.__version__}")
 
 # COMMAND ----------
 
@@ -125,7 +124,9 @@ def find_first_existing_column(cols: List[str], candidates: List[str]) -> Option
     return None
 
 
-def normalize_columns(gdf: gpd.GeoDataFrame, dataset: str) -> gpd.GeoDataFrame:
+def normalize_columns(gdf: pd.DataFrame, dataset: str) -> pd.DataFrame:
+    """KSJ_COLUMN_MAP に基づき列名を Silver 契約列名にリネーム。
+    refactor 後は pd.DataFrame（'geometry' 列に shapely オブジェクト保持）を受ける。"""
     if dataset not in KSJ_COLUMN_MAP:
         return gdf
     mapping = KSJ_COLUMN_MAP[dataset]
@@ -147,10 +148,93 @@ print("✅ KSJ_COLUMN_MAP / normalize_columns 定義完了")
 
 # COMMAND ----------
 
-# DBTITLE 1,共通ヘルパー（読み込み・座標変換・行 ID 生成・WKB 化）
-def read_geo_files(geo_dir: str, exts: Tuple[str, ...] = (".shp", ".gml", ".geojson", ".xml")) -> gpd.GeoDataFrame:
-    """ファイルパスを sorted で決定的順序にし、各 GeoDataFrame に _source_path（相対パス）と _row_in_file（ファイル内連番）を付与。
-    これにより stable_row_id が読み込み順・フィルタ後の行順に依存しなくなる。"""
+# DBTITLE 1,共通ヘルパー（読み込み・座標変換・行 ID 生成・WKB 化）— pyshp + shapely + pyproj 版
+# Serverless では fiona/geopandas が動かない（GDAL システム依存）ため、Pure Python スタックで再実装。
+# 公開 API（read_geo_files / to_wgs84 / validate_in_japan_bbox_strict / dissolve_by_key /
+# gdf_to_spark_with_row_ids）は元と同じシグネチャで、内部実装のみ pd.DataFrame ベースに変更。
+# CRS は df.attrs["crs"] に格納（pd.DataFrame 標準のメタデータ slot）。
+
+def _read_prj(prj_path: str) -> Optional[CRS]:
+    """.prj から CRS を読む。失敗時は None"""
+    if not os.path.exists(prj_path):
+        return None
+    try:
+        with open(prj_path, encoding="utf-8") as f:
+            wkt = f.read().strip()
+        if not wkt:
+            return None
+        return CRS.from_wkt(wkt)
+    except Exception:
+        return None
+
+
+def _detect_shp_encoding(shp_path: str) -> str:
+    """同階層の .cpg を読み、文字コードを返す。無ければ Shift-JIS（KSJ デフォルト）"""
+    cpg_path = shp_path[:-4] + ".cpg"
+    if os.path.exists(cpg_path):
+        try:
+            with open(cpg_path) as f:
+                enc = f.read().strip()
+            if enc:
+                return enc
+        except Exception:
+            pass
+    return "cp932"
+
+
+def _read_one_shp(shp_path: str) -> Tuple[pd.DataFrame, Optional[CRS]]:
+    """1 つの .shp を読み、(records DataFrame with 'geometry', crs) を返す"""
+    encoding = _detect_shp_encoding(shp_path)
+    try:
+        sf = shapefile.Reader(shp_path, encoding=encoding)
+    except UnicodeDecodeError:
+        # .cpg が嘘をついている／壊れている時のフォールバック
+        sf = shapefile.Reader(shp_path, encoding="cp932")
+    try:
+        fields = [f[0] for f in sf.fields[1:]]  # 最初の "DeletionFlag" を skip
+        rows = []
+        for sr in sf.shapeRecords():
+            if sr.shape.shapeType == 0:  # null shape
+                geom = None
+            else:
+                try:
+                    geom = _shp_from_geojson(sr.shape.__geo_interface__)
+                except Exception:
+                    geom = None
+            attrs = dict(zip(fields, sr.record))
+            attrs["geometry"] = geom
+            rows.append(attrs)
+    finally:
+        sf.close()
+    df = pd.DataFrame(rows)
+    crs = _read_prj(shp_path[:-4] + ".prj")
+    return df, crs
+
+
+def _read_one_geojson(path: str) -> pd.DataFrame:
+    """GeoJSON ファイル → pd.DataFrame with 'geometry' (shapely). CRS は EPSG:4326 を仮定（GeoJSON 標準）"""
+    with open(path, encoding="utf-8") as f:
+        data = _json.load(f)
+    rows = []
+    for feature in data.get("features", []):
+        geom_json = feature.get("geometry")
+        if geom_json:
+            try:
+                geom = _shp_from_geojson(geom_json)
+            except Exception:
+                geom = None
+        else:
+            geom = None
+        attrs = dict(feature.get("properties", {}))
+        attrs["geometry"] = geom
+        rows.append(attrs)
+    return pd.DataFrame(rows)
+
+
+def read_geo_files(geo_dir: str, exts: Tuple[str, ...] = (".shp",)) -> pd.DataFrame:
+    """ディレクトリ配下の .shp を再帰的に読み、pd.DataFrame に集約。
+    各行に _source_path（相対パス）と _row_in_file（ファイル内連番）を付与し、stable_row_id を決定的にする。
+    複数 CRS が混在する場合は最初のファイルの CRS に揃える。CRS は返り値 df.attrs["crs"] に格納。"""
     paths: List[str] = []
     for root, dirs, files in os.walk(geo_dir):
         dirs.sort()
@@ -161,52 +245,81 @@ def read_geo_files(geo_dir: str, exts: Tuple[str, ...] = (".shp", ".gml", ".geoj
     if not paths:
         raise FileNotFoundError(f"地理空間ファイルが見つかりません: {geo_dir}（拡張子 {exts}）")
 
-    frames: List[gpd.GeoDataFrame] = []
+    frames: List[pd.DataFrame] = []
+    base_crs: Optional[CRS] = None
     for p in paths:
         try:
-            g = gpd.read_file(p)
-            if g.empty:
+            df_one, crs_one = _read_one_shp(p)
+            if df_one.empty:
                 continue
             rel_path = os.path.relpath(p, geo_dir)
-            g["_source_path"] = rel_path
-            g["_source_file"] = os.path.basename(p)
-            g["_row_in_file"] = range(len(g))   # ファイル内の元の行番号（フィルタ後も保持）
-            frames.append(g)
+            df_one["_source_path"] = rel_path
+            df_one["_source_file"] = os.path.basename(p)
+            df_one["_row_in_file"] = range(len(df_one))
+            # CRS 整合: 最初のファイルを base にし、他は base に reproject
+            if base_crs is None:
+                base_crs = crs_one or _DEFAULT_CRS
+            elif crs_one and crs_one != base_crs:
+                transformer = Transformer.from_crs(crs_one, base_crs, always_xy=True)
+                df_one["geometry"] = df_one["geometry"].apply(
+                    lambda g: _shp_transform(transformer.transform, g) if g is not None else None
+                )
+            frames.append(df_one)
         except Exception as e:
             print(f"⚠ 読み込み失敗: {p}: {e}")
     if not frames:
         raise RuntimeError(f"読み込み可能な地理空間ファイルが見つかりません: {geo_dir}")
-    base_crs = frames[0].crs
-    aligned = [g.to_crs(base_crs) if g.crs and g.crs != base_crs else g for g in frames]
-    return gpd.GeoDataFrame(pd.concat(aligned, ignore_index=True), crs=base_crs)
+    out = pd.concat(frames, ignore_index=True)
+    out.attrs["crs"] = base_crs or _DEFAULT_CRS
+    return out
 
 
-def to_wgs84(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    if gdf.crs is None:
+def to_wgs84(gdf: pd.DataFrame) -> pd.DataFrame:
+    """df.attrs['crs'] → EPSG:4326 に reprojection。CRS 未設定は JGD2011 を仮定。"""
+    src_crs: Optional[CRS] = gdf.attrs.get("crs")
+    if src_crs is None:
         print("⚠ CRS 未設定。JGD2011 緯度経度 (EPSG:6668) を仮定")
-        gdf = gdf.set_crs(epsg=6668)
-    if gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs(epsg=4326)
+        src_crs = _DEFAULT_CRS
+    if src_crs.to_epsg() == 4326:
+        gdf.attrs["crs"] = _WGS84
+        return gdf
+    transformer = Transformer.from_crs(src_crs, _WGS84, always_xy=True)
+    gdf = gdf.copy()
+    gdf["geometry"] = gdf["geometry"].apply(
+        lambda g: _shp_transform(transformer.transform, g) if g is not None else None
+    )
+    gdf.attrs["crs"] = _WGS84
     return gdf
 
 
-def validate_in_japan_bbox_strict(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """bounds の minx/maxx/miny/maxy が全て日本 bbox 内のジオメトリのみ残す（座標系誤認のセーフティ）"""
+def validate_in_japan_bbox_strict(gdf: pd.DataFrame) -> pd.DataFrame:
+    """bounds が全て日本 bbox 内のジオメトリのみ残す（座標系誤認のセーフティ）"""
     JP_BBOX = (122.0, 24.0, 146.0, 46.0)
     minx_lim, miny_lim, maxx_lim, maxy_lim = JP_BBOX
     if gdf.empty:
         return gdf
-    bounds = gdf.geometry.bounds
-    mask = (
-        (bounds["minx"] >= minx_lim) & (bounds["maxx"] <= maxx_lim)
-        & (bounds["miny"] >= miny_lim) & (bounds["maxy"] <= maxy_lim)
-    )
+    def in_bbox(g):
+        if g is None:
+            return False
+        x1, y1, x2, y2 = g.bounds
+        return x1 >= minx_lim and x2 <= maxx_lim and y1 >= miny_lim and y2 <= maxy_lim
     n_before = len(gdf)
+    mask = gdf["geometry"].apply(in_bbox)
     gdf = gdf[mask].reset_index(drop=True)
     n_after = len(gdf)
     if n_after < n_before:
         print(f"⚠ 日本 bbox 外（または bbox を跨ぐ） {n_before - n_after} 件を除外")
     return gdf
+
+
+def cx_filter(gdf: pd.DataFrame, minx: float, miny: float, maxx: float, maxy: float) -> pd.DataFrame:
+    """gpd.GeoDataFrame.cx[minx:maxx, miny:maxy] 相当: bbox と交差するジオメトリを残す"""
+    def intersects(g):
+        if g is None:
+            return False
+        x1, y1, x2, y2 = g.bounds
+        return not (x2 < minx or x1 > maxx or y2 < miny or y1 > maxy)
+    return gdf[gdf["geometry"].apply(intersects)].reset_index(drop=True)
 
 
 def stable_row_id(row_in_file: int, geom: Optional[BaseGeometry], source_path: Optional[str]) -> int:
@@ -225,12 +338,12 @@ def stable_row_id(row_in_file: int, geom: Optional[BaseGeometry], source_path: O
 
 
 def gdf_to_spark_with_row_ids(
-    gdf: gpd.GeoDataFrame,
+    gdf: pd.DataFrame,
     *,
     add_simplified: bool = True,
     simplify_tolerance_deg: float = 0.00005,
 ) -> "DataFrame":
-    """GeoDataFrame → Spark DataFrame。各行に決定的な stable row_id を付与。原典 WKB + 簡略化 WKB を別列で保持。
+    """pd.DataFrame → Spark DataFrame。各行に決定的な stable row_id を付与。原典 WKB + 簡略化 WKB を別列で保持。
     _row_in_file（ファイル内連番）と _source_path（相対パス）が読み込み時点で付与されている前提（read_geo_files）。"""
     pdf = gdf.reset_index(drop=True).copy()
     if "_row_in_file" not in pdf.columns:
@@ -252,28 +365,38 @@ def gdf_to_spark_with_row_ids(
     return spark.createDataFrame(pdf)
 
 
-def dissolve_by_key(gdf: gpd.GeoDataFrame, key: str) -> gpd.GeoDataFrame:
-    """key 列でポリゴンを結合（1 key = 1 行）。N03 の島しょ・分割ポリゴン対応。
+def dissolve_by_key(gdf: pd.DataFrame, key: str) -> pd.DataFrame:
+    """key 列でポリゴンを結合（shapely.ops.unary_union）。1 key = 1 行。
     dissolve 後は _row_in_file を sorted(key) ベースで再付与し、決定性を保つ。"""
     if key not in gdf.columns:
         return gdf
-    gdf = gdf[gdf[key].notna()].copy()
-    dissolved = gdf.dissolve(by=key, aggfunc="first").reset_index()
-    dissolved = dissolved.sort_values(by=key).reset_index(drop=True)
-    dissolved["_row_in_file"] = range(len(dissolved))
-    dissolved["_source_path"] = f"dissolved_by_{key}"
-    dissolved["_source_file"] = f"dissolved_by_{key}"
-    return dissolved
+    sub = gdf[gdf[key].notna()]
+    if sub.empty:
+        empty = gdf.iloc[0:0].copy()
+        empty.attrs["crs"] = gdf.attrs.get("crs")
+        return empty
+    rows = []
+    for k, group in sub.groupby(key, sort=True):
+        geom = unary_union([g for g in group["geometry"].tolist() if g is not None])
+        first = group.iloc[0].to_dict()
+        first["geometry"] = geom
+        rows.append(first)
+    out = pd.DataFrame(rows).sort_values(by=key).reset_index(drop=True)
+    out["_row_in_file"] = range(len(out))
+    out["_source_path"] = f"dissolved_by_{key}"
+    out["_source_file"] = f"dissolved_by_{key}"
+    out.attrs["crs"] = gdf.attrs.get("crs")
+    return out
 
 
-print("✅ ヘルパー関数 定義完了")
+print("✅ ヘルパー関数 定義完了（pyshp + shapely + pyproj）")
 
 # COMMAND ----------
 
 # MAGIC %md-sandbox
 # MAGIC <div style="background: #1B3139; color: #FFFFFF; padding: 14px 20px; border-radius: 6px; margin: 20px 0 10px 0;">
 # MAGIC <h2 style="margin: 0; color: #FFFFFF; font-size: 20px;">🥉 Bronze 地理空間 10 テーブル</h2>
-# MAGIC <p style="margin: 4px 0 0 0; color: #B0BEC5; font-size: 13px;">geopandas で読み込み、行 ID と WKB バイナリで保持して Spark Delta に書き込み</p>
+# MAGIC <p style="margin: 4px 0 0 0; color: #B0BEC5; font-size: 13px;">pyshp + shapely + pyproj で読み込み、行 ID と WKB バイナリで保持して Spark Delta に書き込み</p>
 # MAGIC </div>
 
 # COMMAND ----------
@@ -350,7 +473,7 @@ print(f"Point ジオメトリのみ抽出: {len(gdf)} 件")
 # 7 都府県 bbox で絞り込み
 TARGET_BBOX = (122.0, 33.0, 141.0, 36.5)  # minx, miny, maxx, maxy
 minx, miny, maxx, maxy = TARGET_BBOX
-gdf = gdf.cx[minx:maxx, miny:maxy].reset_index(drop=True)
+gdf = cx_filter(gdf, minx, miny, maxx, maxy)
 
 gdf = normalize_columns(gdf, "N02")
 df = gdf_to_spark_with_row_ids(gdf, add_simplified=False)
@@ -380,15 +503,19 @@ print(f"✅ bz_geo_admin: {spark.table('bz_geo_admin').count():,} 行")
 # COMMAND ----------
 
 # DBTITLE 1,8/10: bz_geo_pop_mesh（1km メッシュ別将来推計人口 KSJ mesh1000）
-gdf = read_geo_files(f"{VOLUME_PATH}/geo/mesh1000")
-gdf = to_wgs84(gdf)
-gdf = validate_in_japan_bbox_strict(gdf)
-# 7 都府県 bbox で絞り込み
-gdf = gdf.cx[minx:maxx, miny:maxy].reset_index(drop=True)
-gdf = normalize_columns(gdf, "mesh1000")
-df = gdf_to_spark_with_row_ids(gdf)
-df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("bz_geo_pop_mesh")
-print(f"✅ bz_geo_pop_mesh: {spark.table('bz_geo_pop_mesh').count():,} 行")
+# 注意: NB 01 で mesh1000 の URL が古く 404 の場合、Volume が空。このセルは FileNotFoundError でスキップされる。
+try:
+    gdf = read_geo_files(f"{VOLUME_PATH}/geo/mesh1000")
+    gdf = to_wgs84(gdf)
+    gdf = validate_in_japan_bbox_strict(gdf)
+    # 7 都府県 bbox で絞り込み
+    gdf = cx_filter(gdf, minx, miny, maxx, maxy)
+    gdf = normalize_columns(gdf, "mesh1000")
+    df = gdf_to_spark_with_row_ids(gdf)
+    df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("bz_geo_pop_mesh")
+    print(f"✅ bz_geo_pop_mesh: {spark.table('bz_geo_pop_mesh').count():,} 行")
+except FileNotFoundError as e:
+    print(f"⚠ bz_geo_pop_mesh: mesh1000 データなし（{e}）→ テーブル作成スキップ。NB 01 で URL を最新化してください")
 
 # COMMAND ----------
 
@@ -421,7 +548,7 @@ osm_root = f"{VOLUME_PATH}/geo/osm"
 osm_gdfs = []
 for p in osm_files:
     try:
-        g = gpd.read_file(p)
+        g = _read_one_geojson(p)
         if not g.empty:
             g["_source_path"] = os.path.relpath(p, osm_root)
             g["_source_file"] = os.path.basename(p)
@@ -436,7 +563,8 @@ if not osm_gdfs:
         f"01 の Overpass 取得を再実行してください。"
     )
 
-osm_gdf = gpd.GeoDataFrame(pd.concat(osm_gdfs, ignore_index=True), crs="EPSG:4326")
+osm_gdf = pd.concat(osm_gdfs, ignore_index=True)
+osm_gdf.attrs["crs"] = _WGS84  # GeoJSON は EPSG:4326 を仮定
 osm_gdf = validate_in_japan_bbox_strict(osm_gdf)
 osm_gdf = osm_gdf[osm_gdf["geometry"].apply(lambda g: g is not None and g.geom_type == "Point")].reset_index(drop=True)
 df = gdf_to_spark_with_row_ids(osm_gdf, add_simplified=False)

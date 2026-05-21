@@ -52,7 +52,7 @@ Unity Catalog によるガバナンス（PII + 多段位置情報マスキング
 
 | カテゴリ | 技術 |
 |---|---|
-| コンピュート | Serverless（SQL Warehouse / Notebook Serverless / SDP Serverless）<br>**例外：NB 03（地理空間データパイプライン）のみ Classic cluster 必須**。geopandas / fiona が GDAL システムライブラリに依存し、Serverless でビルド不可のため。NB 01 / 02 / 04 以降は Serverless で動作可。 |
+| コンピュート | Serverless（SQL Warehouse / Notebook Serverless / SDP Serverless）<br>全 NB が Serverless で動作。NB 03 は GDAL 非依存の Pure Python スタック（**pyshp + shapely + pyproj**）で実装。 |
 | 言語 | SQL, Python (PySpark) |
 | 取り込み | Autoloader（`cloud_files`）+ Volume |
 | パイプライン | Spark Declarative Pipelines（SDP）+ Expectations |
