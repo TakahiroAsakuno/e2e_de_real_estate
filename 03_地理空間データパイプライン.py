@@ -182,14 +182,10 @@ def _detect_shp_encoding(shp_path: str) -> str:
     return "cp932"
 
 
-def _read_one_shp(shp_path: str) -> Tuple[pd.DataFrame, Optional[CRS]]:
-    """1 つの .shp を読み、(records DataFrame with 'geometry', crs) を返す"""
-    encoding = _detect_shp_encoding(shp_path)
-    try:
-        sf = shapefile.Reader(shp_path, encoding=encoding)
-    except UnicodeDecodeError:
-        # .cpg が嘘をついている／壊れている時のフォールバック
-        sf = shapefile.Reader(shp_path, encoding="cp932")
+def _try_read_shp_records(shp_path: str, encoding: str, errors: str = "strict") -> List[dict]:
+    """指定 encoding で .shp の全レコードを読む。errors='strict' なら UnicodeDecodeError を伝播、
+    'replace' なら不正バイトを U+FFFD に置換して mojibake 込みで完走"""
+    sf = shapefile.Reader(shp_path, encoding=encoding, encodingErrors=errors)
     try:
         fields = [f[0] for f in sf.fields[1:]]  # 最初の "DeletionFlag" を skip
         rows = []
@@ -206,6 +202,32 @@ def _read_one_shp(shp_path: str) -> Tuple[pd.DataFrame, Optional[CRS]]:
             rows.append(attrs)
     finally:
         sf.close()
+    return rows
+
+
+def _read_one_shp(shp_path: str) -> Tuple[pd.DataFrame, Optional[CRS]]:
+    """1 つの .shp を読み、(records DataFrame with 'geometry', crs) を返す。
+    .cpg が無い／嘘の場合に備え、複数の Japanese encoding を chain で試行。
+    全 strict 試行失敗時は utf-8 + 置換で読み込みを継続する（mojibake 警告付き）。"""
+    declared = _detect_shp_encoding(shp_path)
+    # 試行順: .cpg 宣言 → utf-8 → cp932 → shift_jis → euc_jp（重複排除）
+    candidates: List[str] = []
+    for c in [declared, "utf-8", "cp932", "shift_jis", "euc_jp"]:
+        if c and c not in candidates:
+            candidates.append(c)
+
+    rows: Optional[List[dict]] = None
+    for enc in candidates:
+        try:
+            rows = _try_read_shp_records(shp_path, enc, errors="strict")
+            break
+        except UnicodeDecodeError:
+            continue
+    if rows is None:
+        # 全 encoding 失敗 → 最終 fallback: utf-8 + 置換で mojibake 込み完走
+        print(f"⚠ {shp_path}: 全 encoding 試行失敗、utf-8 + 置換で読み込み継続（mojibake の可能性）")
+        rows = _try_read_shp_records(shp_path, "utf-8", errors="replace")
+
     df = pd.DataFrame(rows)
     crs = _read_prj(shp_path[:-4] + ".prj")
     return df, crs
