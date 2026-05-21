@@ -24,7 +24,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,変数設定
-MY_CATALOG  = "komae_demo_v4"             # カタログは事前作成済み前提
+MY_CATALOG  = "asakuno_demo_v4"             # カタログは事前作成済み前提
 MY_SCHEMA   = "real_estate_e2e_demo"      # このデモ専用スキーマ
 MY_VOLUME   = "raw_data"                  # CSV / Shapefile / PDF / MP3 を配置する Volume
 
@@ -35,7 +35,7 @@ LLM_MODEL = "databricks-claude-opus-4-7"
 
 # Whisper 文字起こし用 Model Serving エンドポイント名
 # UC 上の Whisper モデルを Model Serving にデプロイした際のエンドポイント名を指定
-WHISPER_ENDPOINT = "komae_whisper_large_v3"
+WHISPER_ENDPOINT = "asakuno_whisper_large_v3"
 
 # COMMAND ----------
 
